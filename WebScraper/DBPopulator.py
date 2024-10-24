@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup  # Import BeautifulSoup for parsing HTML
 import requests  # Import requests for making HTTP requests
 import os  # Import os for operating system interaction
-from transformers import BertModel, BertTokenizer,RobertaTokenizer, RobertaModel
+from transformers import RobertaTokenizer, RobertaModel
 import torch
 
 seasonCode = "SU24"  # Set the season code
