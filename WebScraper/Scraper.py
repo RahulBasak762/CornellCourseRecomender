@@ -92,7 +92,6 @@ for subjectCode in courses.keys():
 file_name = "roster-" + seasonCode + ".txt"
 with open(file_name, 'w') as file:
     for subjectCode in courseRoster.keys():
-        #TODO get the full name of subject in there
         file.write("\n\n$" + subjectCode + " | " + subjectNames[subjectCode] + "$\n")
         for course in courseRoster[subjectCode].keys():
             file.write("&" + course + "&\n")
