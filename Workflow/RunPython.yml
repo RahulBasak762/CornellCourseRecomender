@@ -1,0 +1,26 @@
+name: Run Python Script
+
+on: push
+
+env:
+  dbUsername: ${{ secrets.DB_USERNAME }}
+  dbPassword: ${{ secrets.DB_PASSWORD }}
+
+jobs:
+  test_env:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+        with:
+          python-version: 3.8
+
+      - name: Setup Python
+        run: actions/setup-python@v4
+        with:
+          python-version: '3.14'
+
+      - name: Run Python Script
+        run: |
+          pip install requests
+          python updated_DBPopulator.py

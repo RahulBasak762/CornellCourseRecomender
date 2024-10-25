@@ -1,11 +1,14 @@
 from bs4 import BeautifulSoup  # Import BeautifulSoup for parsing HTML
 import requests  # Import requests for making HTTP requests
 import os  # Import os for operating system interaction
-from transformers import RobertaTokenizer, RobertaModel
+from transformers import RobertaTokenizer, RobertaModel, RobertaForSequenceClassification
 import torch
+from playwright.sync_api import sync_playwright
+import psycopg2
 
 seasonCode = "SU24"  # Set the season code
 
+print(os.environ['DB_USERNAME'])
 
 # Request the main page for the specified season code and parse the HTML
 mainPage = requests.get("https://classes.cornell.edu/browse/roster/" + seasonCode)
@@ -23,7 +26,6 @@ subjectNameSet = soup.findAll('li', attrs={"class":"browse-subjectdescr"})
 subjectCodeLines = {}
 subjectNames = {}
 iterator = 0  # Iterator for tracking subject names
-
 
 
 # Populate subjectCodeLines and subjectNames dictionaries
@@ -56,10 +58,10 @@ for subjectCode in subjectCodeLines.keys():
 
 
 # Load pre-trained RoBERTa tokenizer
-tokenizer = RobertaTokenizer.from_pretrained('roberta-small')
+tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 
 # Load pre-trained RoBERTa model for sequence classification (e.g., binary classification)
-model = RobertaModel.from_pretrained('roberta-small')
+model = RobertaModel.from_pretrained('roberta-base')
 
 
 
@@ -69,11 +71,13 @@ courseRoster = {}
 courseCreditHours = {}
 courseDistributions = {}
 courseVectors = {}
+courseRatings = {}
 for subjectCode in courses.keys():
     subjectRoster = {}  # Dictionary for storing course descriptions per subject
     subjectCredits = {} # Dictionary for storing course credits per subject
     subjectDistributions = {} # Dictionary for storing course distributions per subject
-    subjectVectors = {}
+    subjectVectors = {} # Dictionary for storing course description vectors
+    subjectRatings = {} # Dictionary for storing course ratings
     for course in courses[subjectCode]:
         # Construct the URL for the specific course's details page
         websiteDomain = (subjectCodeLines[subjectCode][0:47] + "class/" + subjectCode + "/" +
@@ -99,14 +103,40 @@ for subjectCode in courses.keys():
         # Extract the distribution categories
         courseDistribution = soup.find('span', class_='catalog-distr')
         if courseDistribution:
-            courseDistribution = courseDistribution.text.strip() # Clean the distributions string
+            courseDistribution = courseDistribution.text.strip()[22:len(courseDistribution.text)] # Clean the distributions string
         else:
             courseDistribution = ""
 
+
+        overallRating = [-1.0, -1.0, -1.0]
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch(headless=True)
+
+                # Open a new page
+                page = browser.new_page()
+
+                # Navigate to the website
+                page.goto("https://www.cureviews.org/course/" + subjectCode + "/" +
+                          course[len(course) - 4 : len(course)])
+                # Wait for the rating element to load (adjust selector based on actual HTML)
+                page.wait_for_selector("._rating_zvrrc_22", timeout=1000)
+                # Extract the rating
+                overallRating = page.query_selector_all("._rating_zvrrc_22")
+
+                for i in range(3):
+                    overallRating[i] = float(overallRating[i].text_content().strip())
+            except Exception as e:
+                overallRating = [-1.0, -1.0, -1.0]
+            finally:
+                # Close the browser
+                browser.close()
+
+
         #Vector creation
         # Tokenize input text
-        inputs = tokenizer(courseDescription, return_tensors='pt', max_length=256, truncation=True,
-                           padding='max_length')
+        inputs = tokenizer(courseName + " | " + courseDescription, return_tensors='pt',
+                           max_length=256, truncation=True, padding='max_length')
 
         with torch.no_grad():  # Disable gradients
             outputs = model(**inputs)
@@ -120,13 +150,58 @@ for subjectCode in courses.keys():
         # Map course title to its description
         subjectRoster[course + " | " + courseName] = courseDescription
         subjectCredits[course + " | " + courseName] = creditHours
-        subjectDistributions[course + " | " + courseName] = courseDistribution
+        subjectDistributions[course + " | " + courseName] = courseDistribution[0:
+                                                                            len(courseDistribution)]
         subjectVectors[course + " | " + courseName] = embeddedCourseTokenCLS
+        subjectRatings[course + " | " + courseName] = overallRating
 
-    courseRoster[subjectCode] = subjectRoster  # Store the subject roster
+    courseRoster[subjectCode] = subjectRoster  # Store the subject roster descriptions
     courseCreditHours[subjectCode] = subjectCredits # Store the subject credits
     courseDistributions[subjectCode] = subjectDistributions # Store the subject distributions
-    courseVectors[subjectCode] = subjectVectors
+    courseVectors[subjectCode] = subjectVectors # Store the subject vectors
+    courseRatings[subjectCode] = subjectRatings # Store the subject ratings
+
+
+
+# Database connection parameters
+conn_params = {
+    'dbname': 'your_dbname',
+    'user': 'your_username',
+    'password': 'your_password',
+    'host': 'localhost',  # or your database host
+    'port': '5432'        # default PostgreSQL port
+}
+
+try:
+    # Establish a connection to the database
+    connection = psycopg2.connect(**conn_params)
+
+    # Create a cursor object
+    cursor = connection.cursor()
+
+    # Execute a query
+    cursor.execute("SELECT * FROM your_table;")
+
+    # Fetch results
+    rows = cursor.fetchall()
+    for row in rows:
+        print(row)
+
+except Exception as error:
+    print("Error while connecting to PostgreSQL", error)
+
+finally:
+    # Close the cursor and connection
+    if cursor:
+        cursor.close()
+    if connection:
+        connection.close()
+
+
+
+
+
+
 
 
 
