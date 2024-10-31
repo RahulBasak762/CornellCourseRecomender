@@ -1,14 +1,21 @@
 from bs4 import BeautifulSoup  # Import BeautifulSoup for parsing HTML
 import requests  # Import requests for making HTTP requests
-import os  # Import os for operating system interaction
 from transformers import RobertaTokenizer, RobertaModel, RobertaForSequenceClassification
 import torch
+from sentence_transformers import SentenceTransformer
 from playwright.sync_api import sync_playwright
-import psycopg2
+import sqlite3
+import os
+import pickle
 
-seasonCode = "SU24"  # Set the season code
 
-print(os.environ['DB_USERNAME'])
+seasonCode = "WI24"  # Set the season code
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+model = SentenceTransformer("Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+                            trust_remote_code=True)
+model.max_seq_length = 8192
+
 
 # Request the main page for the specified season code and parse the HTML
 mainPage = requests.get("https://classes.cornell.edu/browse/roster/" + seasonCode)
@@ -26,6 +33,7 @@ subjectNameSet = soup.findAll('li', attrs={"class":"browse-subjectdescr"})
 subjectCodeLines = {}
 subjectNames = {}
 iterator = 0  # Iterator for tracking subject names
+
 
 
 # Populate subjectCodeLines and subjectNames dictionaries
@@ -56,12 +64,6 @@ for subjectCode in subjectCodeLines.keys():
 
 
 
-
-# Load pre-trained RoBERTa tokenizer
-tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
-
-# Load pre-trained RoBERTa model for sequence classification (e.g., binary classification)
-model = RobertaModel.from_pretrained('roberta-base')
 
 
 
@@ -134,26 +136,17 @@ for subjectCode in courses.keys():
 
 
         #Vector creation
-        # Tokenize input text
-        inputs = tokenizer(courseName + " | " + courseDescription, return_tensors='pt',
-                           max_length=256, truncation=True, padding='max_length')
-
-        with torch.no_grad():  # Disable gradients
-            outputs = model(**inputs)
-
-        # Get embeddings from the last hidden layer
-        last_hidden_states = outputs.last_hidden_state
-
-        # CLS token embedding
-        embeddedCourseTokenCLS = last_hidden_states[:, 0, :]
+        vector = model.encode(course + " | " + courseName + ": " + courseDescription,
+                              convert_to_numpy = True)
 
         # Map course title to its description
         subjectRoster[course + " | " + courseName] = courseDescription
         subjectCredits[course + " | " + courseName] = creditHours
         subjectDistributions[course + " | " + courseName] = courseDistribution[0:
                                                                             len(courseDistribution)]
-        subjectVectors[course + " | " + courseName] = embeddedCourseTokenCLS
+        subjectVectors[course + " | " + courseName] = vector
         subjectRatings[course + " | " + courseName] = overallRating
+        print(course + " | " + courseName)
 
     courseRoster[subjectCode] = subjectRoster  # Store the subject roster descriptions
     courseCreditHours[subjectCode] = subjectCredits # Store the subject credits
@@ -163,60 +156,54 @@ for subjectCode in courses.keys():
 
 
 
-# Database connection parameters
-conn_params = {
-    'dbname': 'your_dbname',
-    'user': 'your_username',
-    'password': 'your_password',
-    'host': 'localhost',  # or your database host
-    'port': '5432'        # default PostgreSQL port
-}
 
-try:
-    # Establish a connection to the database
-    connection = psycopg2.connect(**conn_params)
+# Connect to SQLite database (or create it if it doesn't exist)
+conn = sqlite3.connect(seasonCode + ".db")  # Specify your database name
 
-    # Create a cursor object
-    cursor = connection.cursor()
+# Create a cursor object
+cursor = conn.cursor()
 
-    # Execute a query
-    cursor.execute("SELECT * FROM your_table;")
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS courses (
+    id INTEGER PRIMARY KEY,
+    full_name TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    course_number INTEGER NOT NULL,
+    description TEXT,
+    description_vector BLOB,
+    distributions TEXT,
+    credits TEXT,
+    is_fws BOOLEAN NOT NULL,
+    is_lad BOOLEAN NOT NULL
+)
+''')
+conn.commit()
 
-    # Fetch results
-    rows = cursor.fetchall()
-    for row in rows:
-        print(row)
+count = 0
+for key in courseRoster.keys():
+    for sub_key in courseRoster[key].keys():
+        print(sub_key)
+        id = count
+        full_name = sub_key
+        subject = key
+        courseNumber = sub_key[len(sub_key) - 4 : len(sub_key)]
+        description = courseRoster[key][sub_key]
+        #TODO fix
+        vector_blob = pickle.dumps(courseVectors[key][sub_key])
+        distributions = courseDistributions[key][sub_key]
+        credits = courseCreditHours[key][sub_key]
+        fws = ("FWS" in sub_key)
+        lad = ("CA" in distributions or "LA" in distributions or "LAD" in distributions
+               or "ALC" in distributions or "SCD" in distributions or "HA" in distributions
+               or "HST" in distributions or "KCM" in distributions or "ETM" in distributions
+               or "SBA" in distributions or "SSC" in distributions or "GLC" in distributions
+               or "FL" in distributions or "CE" in distributions)
+        count += 1
 
-except Exception as error:
-    print("Error while connecting to PostgreSQL", error)
-
-finally:
-    # Close the cursor and connection
-    if cursor:
-        cursor.close()
-    if connection:
-        connection.close()
-
-
-
-
-
-
-
-
-
-
-
-#TODO Database
-
-# Write the collected course data to a text file
-# file_name = "roster-" + seasonCode + ".txt"  # Define the output filename
-# with open(file_name, 'w') as file:  # Open file for writing
-#     for subjectCode in courseRoster.keys():
-#         # Write subject code and name
-#         file.write("\n\n$" + subjectCode + " | " + subjectNames[subjectCode] + "$\n")
-#         for course in courseRoster[subjectCode].keys():
-#             file.write("&" + course + "&\n")  # Write course title
-#             file.write("#" + courseRoster[subjectCode][course] + "#\n")  # Write course description
-#
-# file.close()  # Close the file
+        cursor.execute('''
+            INSERT INTO courses (id, full_name, subject, course_number, description, 
+            description_vector, distributions, credits, is_fws, is_lad) VALUES 
+            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', (id, full_name, subject,
+            courseNumber, description, vector_blob, distributions, credits, fws, lad))
+        conn.commit()
+conn.close()
